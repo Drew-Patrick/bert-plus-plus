@@ -93,16 +93,20 @@ def main() -> None:
     n_params = count_parameters(model)
     model.to(device)
 
-    wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls={ParallelTransformerBlock},
-    )
-    model = FSDP(
-        model,
-        auto_wrap_policy=wrap_policy,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        device_id=local_rank,
-    )
+    if distributed:
+        wrap_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={ParallelTransformerBlock},
+        )
+        model = FSDP(
+            model,
+            auto_wrap_policy=wrap_policy,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            device_id=local_rank,
+        )
+    # single GPU trains the bare model. FSDP needs an initialized process
+    # group and sharding across one rank does nothing, so we keep AMP and
+    # activation checkpointing and skip the wrap.
 
     optimizer = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = LambdaLR(optimizer, lr_lambda)
@@ -176,8 +180,11 @@ def main() -> None:
             )
 
         if step % CKPT_INTERVAL == 0 or step == MAX_STEPS:
-            cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+            if distributed:
+                cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+                with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+                    state_dict = model.state_dict()
+            else:
                 state_dict = model.state_dict()
             if rank == 0:
                 path = os.path.join(CKPT_DIR, f"checkpoint_step_{step}.pt")

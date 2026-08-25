@@ -1,6 +1,6 @@
 # BERT++: BERT-Large-Scale Pretraining on Constrained Hardware
 
-**A 341M-parameter encoder at BERT-Large depth and width, with PaLM-style parallel blocks, SwiGLU feed-forwards, and XPos rotary embeddings, trained under a tight memory budget: FSDP parameter sharding, activation checkpointing, mixed precision, and a FlashAttention-ready attention path, over streamed C4 + The Pile.**
+**A 341M-parameter encoder at BERT-Large depth and width, with PaLM-style parallel blocks, SwiGLU feed-forwards, and XPos rotary embeddings, engineered to train under a tight memory budget: FSDP parameter sharding, activation checkpointing, mixed precision, and a FlashAttention-ready attention path, over streamed C4 + The Pile.**
 
 ---
 
@@ -75,8 +75,11 @@ pip install -r requirements.txt
 
 ```bash
 wandb login          # or export WANDB_API_KEY=...
-torchrun --nproc_per_node=3 src/train.py
+torchrun --nproc_per_node=N src/train.py   # N GPUs on one node
+python src/train.py                        # single GPU
 ```
+
+On one GPU the model trains bare with AMP and activation checkpointing. FSDP engages only when torchrun launches multiple processes.
 
 FlashAttention-2 is optional and CUDA-toolchain-specific: `pip install flash-attn --no-build-isolation`. The code falls back to `scaled_dot_product_attention` automatically.
 
