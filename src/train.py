@@ -1,19 +1,21 @@
 """
-train.py — FSDP pretraining entry point for BERT++.
+train.py
 
-Launch (N GPUs on one node):
+FSDP training entry point for BERT++. Launch with torchrun:
+
     torchrun --nproc_per_node=N src/train.py
 
-Design notes:
-  * FSDP with a transformer_auto_wrap_policy over ParallelTransformerBlock and
-    explicit FULL_SHARD — the per-layer gather/release cycle is where the
-    memory savings come from.
-  * bf16 autocast when the GPU supports it (no GradScaler needed); fp16 +
-    GradScaler otherwise.
-  * Linear warmup (10k steps) then linear decay; gradient clipping at 1.0.
-  * Per-rank streaming via datasets.distributed.split_dataset_by_node.
-  * Checkpoints are rank-0-gathered full model state dicts, saved locally.
-    Optimizer state is not yet saved (see README next steps).
+How it is set up:
+  * FSDP wraps each ParallelTransformerBlock through
+    transformer_auto_wrap_policy with FULL_SHARD. The per layer gather and
+    release is where the memory savings actually come from.
+  * bf16 autocast when the GPU supports it, which needs no GradScaler.
+    Otherwise fp16 with a GradScaler.
+  * 10k steps of linear warmup then linear decay, gradient clipping at 1.0.
+  * Each rank gets its own slice of the stream through
+    datasets.distributed.split_dataset_by_node.
+  * Checkpoints are the full model state dict gathered on rank 0 and saved
+    locally. Optimizer state is not saved yet, that is on the todo list.
 """
 
 import functools
@@ -73,7 +75,7 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
 
-    # bf16 needs no loss scaling; fp16 does
+    # bf16 does not need loss scaling, fp16 does
     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
 
@@ -81,7 +83,7 @@ def main() -> None:
     tokenizer = get_tokenizer()
     dataset = get_datasets(tokenizer)
     if distributed:
-        # supported API for sharding a streaming dataset across ranks
+        # the supported way to shard a streaming dataset across ranks
         dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
     dataloader = get_dataloader(dataset, tokenizer, batch_size=BATCH_SIZE)
 

@@ -1,18 +1,23 @@
 """
-setup_bertpp.py — tokenizer, streaming data, MLM collation, and the BERT++ model.
+setup_bertpp.py
 
-Single source of truth: the notebook and src/train.py both import from here.
+The tokenizer, the streaming datasets, the MLM collator, and the model all
+live here. The notebook and train.py both import from this file so there is
+only one copy of everything.
 
-Design notes:
-  * BERT-Large depth/width (24 layers, 16 heads, 1024 dim) with PaLM-style
-    parallel blocks, SwiGLU FFNs, and XPos rotary embeddings.
-  * ff_dim follows the SwiGLU convention of ~(8/3)*d rounded to a multiple
-    of 256 (2816 for d=1024), keeping parameters comparable to a standard
-    4*d FFN. The tied model is ~340.9M parameters (340,925,242 exactly).
-  * Attention uses a fused QKV projection with precomputed RoPE/XPos tables;
-    FlashAttention-2 when available and no padding mask is present, torch
-    scaled_dot_product_attention otherwise.
-  * Activation checkpointing uses use_reentrant=False, which composes with FSDP.
+A few decisions worth writing down:
+  * BERT-Large size. 24 layers, 16 heads, 1024 dim, with parallel
+    attention/FFN blocks like PaLM, SwiGLU feed forwards, and XPos rotary
+    embeddings.
+  * ff_dim uses the usual SwiGLU sizing of about (8/3)*d rounded to a
+    multiple of 256, which is 2816 for d=1024. That keeps the parameter
+    count in line with a normal 4*d FFN. With tied weights the model comes
+    out to 340,925,242 parameters, about 340.9M.
+  * Attention is one fused QKV projection with precomputed RoPE and XPos
+    tables. FlashAttention-2 kicks in when it is installed and there is no
+    padding mask, otherwise torch scaled_dot_product_attention.
+  * Gradient checkpointing uses use_reentrant=False since that is the
+    version that plays nice with FSDP.
 """
 
 import math
@@ -76,7 +81,7 @@ def get_datasets(tokenizer, use_streaming: bool = True):
     """
     Build the iterable pre-training dataset.
 
-      * Streams The Pile when available; always streams AllenAI C4.
+      * Streams The Pile when it is available, and always streams AllenAI C4.
       * Interleaves the two 50/50 if both are present.
       * Shuffles with a fixed-size buffer, tokenizes on the fly, and keeps
         only the columns the collator needs.
@@ -113,9 +118,10 @@ def get_datasets(tokenizer, use_streaming: bool = True):
 # ---------------------------------------------------------------------------
 def make_mlm_collate(tokenizer, max_seq_len: int = MAX_SEQ_LEN, mlm_prob: float = 0.15):
     """
-    Returns a collate_fn implementing BERT's 15% / 80-10-10 masking scheme.
-    Vocab size, mask id, and special ids are captured from the tokenizer;
-    special tokens ([CLS]/[SEP]/[PAD]) are never selected for masking.
+    Builds the collate_fn for BERT style masking. 15% of the non special
+    tokens get picked, then 80/10/10 mask/random/keep. The vocab size, the
+    mask id, and the special ids all get grabbed from the tokenizer here.
+    Special tokens like [CLS] and [SEP] never get masked.
     """
     vocab_size = tokenizer.vocab_size
     mask_token_id = tokenizer.mask_token_id
@@ -136,7 +142,7 @@ def make_mlm_collate(tokenizer, max_seq_len: int = MAX_SEQ_LEN, mlm_prob: float 
             input_ids_tensor[i, : len(seq)] = torch.tensor(seq, dtype=torch.long)
             attention_mask_tensor[i, : len(seq)] = 1
 
-            # positions eligible for masking: real tokens that are not special
+            # only real tokens can get masked, never the special ones
             candidates = [j for j, t in enumerate(seq) if t not in special_ids]
             if not candidates:
                 continue
@@ -168,10 +174,10 @@ def make_mlm_collate(tokenizer, max_seq_len: int = MAX_SEQ_LEN, mlm_prob: float 
 
 
 def get_dataloader(dataset, tokenizer, batch_size: int = 8, num_workers: int = 0):
-    """DataLoader over a streaming dataset with the MLM collator.
-
-    num_workers defaults to 0: worker processes each re-open a streaming
-    dataset from the top, which silently duplicates data.
+    """
+    DataLoader over the streaming dataset with the MLM collator.
+    num_workers stays 0 on purpose. with a streaming dataset every worker
+    opens its own copy from the top and the data silently gets duplicated.
     """
     return DataLoader(
         dataset,
@@ -187,10 +193,10 @@ def get_dataloader(dataset, tokenizer, batch_size: int = 8, num_workers: int = 0
 # ---------------------------------------------------------------------------
 class SelfAttention(nn.Module):
     """
-    Multi-head self-attention with XPos rotary embeddings and optional
-    FlashAttention-2. Falls back to torch scaled_dot_product_attention when
-    Flash kernels are unavailable or when a key-padding mask is supplied
-    (FlashAttention's basic API does not take arbitrary padding masks).
+    Multi head self attention with XPos rotary embeddings. Uses
+    FlashAttention-2 when it is installed and there is no padding mask,
+    since the basic flash api does not take padding masks. Otherwise it
+    falls back to torch scaled_dot_product_attention.
     """
 
     def __init__(self, embed_dim, num_heads, dropout_rate=0.1,
@@ -242,7 +248,7 @@ class SelfAttention(nn.Module):
 
     def forward(self, x, attention_mask=None):
         """
-        x: [B, L, E]; attention_mask: [B, L] with 1 for valid tokens.
+        x is [B, L, E]. attention_mask is [B, L] with 1 for valid tokens.
         """
         B, L, _ = x.size()
         qkv = self.qkv_proj(x).view(B, L, 3, self.num_heads, self.head_dim)
@@ -260,7 +266,7 @@ class SelfAttention(nn.Module):
                 causal=False,
             )                                                 # [B, L, H, D]
         else:
-            # SDPA bool mask convention: True = position may be attended
+            # SDPA bool masks work as True = this position can be attended to
             attn_mask = None
             if attention_mask is not None:
                 attn_mask = attention_mask.to(torch.bool).view(B, 1, 1, L)
@@ -276,7 +282,8 @@ class SelfAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    """SwiGLU FFN with a fused input projection (value and gate in one matmul)."""
+    """SwiGLU feed forward. The input projection is fused so the value and
+    gate branches come out of one matmul."""
 
     def __init__(self, embed_dim: int, ff_dim: int, dropout_rate: float = 0.1):
         super().__init__()
@@ -291,8 +298,8 @@ class FeedForward(nn.Module):
 
 
 class ParallelTransformerBlock(nn.Module):
-    """PaLM-style block: attention and FFN read the same pre-norm input,
-    their outputs are summed into a single residual."""
+    """PaLM style block. Attention and the FFN both read the same pre norm
+    input and their outputs get summed into one residual."""
 
     def __init__(self, embed_dim: int, num_heads: int, ff_dim: int,
                  dropout_rate: float = 0.1):
@@ -310,13 +317,11 @@ class ParallelTransformerBlock(nn.Module):
 
 class TransformerModel(nn.Module):
     """
-    BERT++: an encoder at BERT-Large depth/width with PaLM-style parallel
-    blocks, SwiGLU FFNs, XPos rotary embeddings, and a tied-weight MLM head.
-
-    Defaults are the real thing: 24 layers x 16 heads x 1024 dim. ff_dim
-    follows the SwiGLU convention of ~(8/3)*d rounded to a multiple of 256
-    (2816 for d=1024), which keeps parameters comparable to a standard
-    4*d FFN — the tied model lands at ~340.9M parameters (340,925,242 exactly, tied weights counted once).
+    The BERT++ encoder. BERT-Large depth and width with parallel blocks,
+    SwiGLU feed forwards, XPos rotary embeddings, and a tied weight MLM
+    head. The defaults are the real thing, 24 layers by 16 heads by 1024
+    dim. ff_dim=2816 follows the SwiGLU 8/3 sizing so the tied model lands
+    at about 340.9M parameters.
     """
 
     def __init__(
@@ -337,13 +342,13 @@ class TransformerModel(nn.Module):
             for _ in range(num_layers)
         )
 
-        # BERT-style MLM transform, decoder tied to the input embedding
+        # BERT style MLM head, the decoder is tied to the input embedding
         self.mlm_dense = nn.Linear(embed_dim, embed_dim)
         self.mlm_act = nn.GELU()
         self.mlm_ln = nn.LayerNorm(embed_dim)
         self.mlm_bias = nn.Parameter(torch.zeros(vocab_size))
 
-        # enabled by train.py; non-reentrant checkpointing for FSDP
+        # train.py flips this on. non reentrant so it works with FSDP
         self.use_checkpoint = False
 
     def forward(self, input_ids, attention_mask=None, labels=None):
@@ -369,7 +374,7 @@ class TransformerModel(nn.Module):
 
 
 def count_parameters(model: nn.Module) -> int:
-    """Unique trainable parameters (tied weights counted once)."""
+    """Counts unique trainable parameters, tied weights only once."""
     seen, total = set(), 0
     for p in model.parameters():
         if p.requires_grad and id(p) not in seen:

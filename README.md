@@ -1,6 +1,6 @@
 # BERT++: BERT-Large-Scale Pretraining on Constrained Hardware
 
-**A 341M-parameter encoder — BERT-Large depth and width with PaLM-style parallel blocks, SwiGLU feed-forwards, and XPos rotary embeddings — trained under a tight memory budget: FSDP parameter sharding, activation checkpointing, mixed precision, and a FlashAttention-ready attention path, over streamed C4 + The Pile.**
+**A 341M-parameter encoder at BERT-Large depth and width, with PaLM-style parallel blocks, SwiGLU feed-forwards, and XPos rotary embeddings, trained under a tight memory budget: FSDP parameter sharding, activation checkpointing, mixed precision, and a FlashAttention-ready attention path, over streamed C4 + The Pile.**
 
 ---
 
@@ -31,14 +31,14 @@ Streamed C4 ⟷ The Pile (50/50 interleave, on-the-fly WordPiece tokenization)
 
 | Technique | What it does here | Why it matters |
 |---|---|---|
-| **FSDP** with `transformer_auto_wrap_policy` | Shards params, grads, and optimizer state; gathers/releases **per block** | The per-layer cycle is the memory win — wrapping the whole model as one flat group (the naive call) forfeits it |
+| **FSDP** with `transformer_auto_wrap_policy` | Shards params, grads, and optimizer state; gathers/releases **per block** | The per-layer cycle is the memory win. Wrapping the whole model as one flat group forfeits it |
 | **Activation checkpointing** (`use_reentrant=False`) | Recomputes activations in backward | Trades compute for memory; the non-reentrant variant composes cleanly with FSDP |
 | **Mixed precision** (`torch.amp`) | bf16 where supported, fp16 + GradScaler otherwise | Halves activation memory, engages tensor cores |
-| **FlashAttention-2 (maskless path)** | IO-aware attention kernels when no padding mask is present | Caveat: MLM batches nearly always carry padding masks, so the SDPA path does the day-to-day work; the flash path exists for packed/fixed-length regimes |
+| **FlashAttention-2 (maskless path)** | IO-aware attention kernels when no padding mask is present | Caveat: MLM batches nearly always carry padding masks, so the SDPA path does the day-to-day work. The flash path exists for packed and fixed-length regimes |
 | **Streaming data** | `interleave_datasets` over C4 + uncopyrighted Pile, sharded per rank via `split_dataset_by_node` | No corpus materialized on disk |
 | **Warmup + decay, gradient clipping** | 10k-step linear warmup → linear decay; clip at 1.0 | Cold-starting 341M params at 1e-4 in fp16 without either is a loss-spike recipe |
 
-## Status — read before citing numbers
+## Status (read before citing numbers)
 
 **No throughput or memory benchmark has been run yet.** The write-up in `docs/` cites *expected* gains from published work (≈1.5× step-time from AMP; ~15% further from FlashAttention on BERT-Large at 512 tokens, Dao et al.). Those are citations, not measurements from this repo. The benchmark plan (four configs × 1/3 GPUs, step time + peak memory) is spelled out in the notebook; results will land here when measured.
 
@@ -53,7 +53,8 @@ What *is* verified today, by running the notebook top to bottom on CPU: the mode
 │   └── train.py          # FSDP entry point: torchrun --nproc_per_node=N src/train.py
 ├── notebooks/
 │   └── bert_pp_fsdp_training.ipynb   # driver: imports src, smoke-tests collator + model on CPU
-├── docs/                 # write-up (see PLACE_FILES_HERE.md)
+├── docs/
+│   └── bert_pp_paper.pdf     # full write-up
 └── requirements.txt
 ```
 
@@ -68,7 +69,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Smoke-test without a GPU** — open `notebooks/bert_pp_fsdp_training.ipynb` and run it: the collator demo and the 341M-parameter forward/loss check run offline on CPU in seconds.
+**Smoke-test without a GPU.** Open `notebooks/bert_pp_fsdp_training.ipynb` and run it: the collator demo and the 341M-parameter forward/loss check run offline on CPU in seconds.
 
 **Train:**
 
@@ -81,8 +82,8 @@ FlashAttention-2 is optional and CUDA-toolchain-specific: `pip install flash-att
 
 ## Next steps
 
-1. **Run and publish the benchmark** — baseline / +AMP / +checkpointing / +FlashAttention across 1 and 3 GPUs; chart to `docs/`, numbers to this Status section.
-2. Add resumable optimizer state to checkpoints (`FSDP.optim_state_dict`) — current checkpoints are model-only.
+1. **Run and publish the benchmark.** Baseline, +AMP, +checkpointing, +FlashAttention across 1 and 3 GPUs. The chart goes to `docs/` and the numbers go to this Status section.
+2. Add resumable optimizer state to checkpoints (`FSDP.optim_state_dict`). Current checkpoints are model-only.
 3. Downstream GLUE evaluation to confirm the memory optimizations don't cost quality.
 4. Compare `FULL_SHARD` vs `SHARD_GRAD_OP` at this model size.
 
@@ -92,8 +93,8 @@ Dao, T., et al. *FlashAttention: Fast and Memory-Efficient Exact Attention with 
 
 ## Author
 
-**Drew Patrick** — M.S. Artificial Intelligence, Kennesaw State University.
+**Drew Patrick**, M.S. Artificial Intelligence, Kennesaw State University.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
