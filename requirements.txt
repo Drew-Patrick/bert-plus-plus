@@ -1,0 +1,13 @@
+# BERT++ — FSDP training of BERT-Large on constrained hardware
+# NOTE: install a torch build matching your CUDA version first:
+#   https://pytorch.org/get-started/locally/
+torch>=2.2
+transformers>=4.40
+datasets>=2.18
+wandb>=0.16
+jupyter>=1.0
+
+# Optional — requires a compatible CUDA toolchain and can be slow to build.
+# Install separately if your GPU supports it:
+#   pip install flash-attn --no-build-isolation
+# flash-attn>=2.5

@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Secrets — never commit these
+.env
+*.key
+*_key.txt
+*_token.txt
+credentials.json
+wandb_key.txt
+
+# Data & model artifacts (too large / not redistributable)
+data/
+*.csv
+*.parquet
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+checkpoints/
+outputs/
+artifacts/
+
+# Experiment tracking
+wandb/
+runs/
+mlruns/
+
+# OS
+.DS_Store
+Thumbs.db
