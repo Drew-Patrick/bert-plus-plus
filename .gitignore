@@ -7,7 +7,7 @@ venv/
 env/
 .ipynb_checkpoints/
 
-# Secrets — never commit these
+# Secrets, never commit these
 .env
 *.key
 *_key.txt
